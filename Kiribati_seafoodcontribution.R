@@ -4,8 +4,6 @@
 #clear R
 rm(list=ls())
 
-#set working directory 
-setwd("C:/Users/jez297/Dropbox/Harvard Postdoc/Kiribati")
 
 #load required packages
 library(reshape2)
@@ -52,33 +50,31 @@ expenditure<-read_dta("30_ExpenditureAggregate.dta")
 foodrecall<-expenditure[expenditure$section=="21_foodrecall",]
 foodrecall<-droplevels(foodrecall)
 
-#Pacific Nutrient DataBase 2020
+#Pacific Nutrient Composition DataBase 2020
 #PNDB are for 100 grams of edible portion.
 pnsb<-read_dta("PNSB_March2022.dta")
 
-#merge data
+#merge nutrient and food data
 foodrecall<-merge(foodrecall, pnsb,by="pndbcode",all.x=T)
-colnames(foodrecall)
-head(foodrecall)
+
+#make sure we keep the labels of coicop classes
+coicop_labels<-stack(attr(foodrecall$coicop_class, 'labels'))
+colnames(coicop_labels)<-c("coicop_class_value","coicop_class")
+foodrecall<-foodrecall %>%rename("coicop_class_value"="coicop_class") %>%left_join(coicop_labels, by="coicop_class_value")
 
 #descriptions in restaurants cafes
-unique(foodrecall$coicop_class)
 foodrecall$Food_description_HIES[foodrecall$coicop_class=="Restaurants, cafes and the like"]
+
+#description of other food products
 summary(as.factor(foodrecall$Food_description_HIES[foodrecall$coicop_class=="Food products n.e.c."]))
-summary(as.factor(foodrecall$Food_description_HIES[foodrecall$coicop_class=="Fruit"]))
 
 #check edible portions for aquatic food groupings
-foodrecall %>%dplyr::filter(coicop_class==113) %>% dplyr::select (ep_, Food_description_HIES) %>%dplyr::group_by(Food_description_HIES) %>% dplyr::summarize(mean_ep=mean(ep_))
+foodrecall %>%dplyr::filter(coicop_class=="Fish and sea food") %>% dplyr::select (ep_, Food_description_HIES) %>%dplyr::group_by(Food_description_HIES) %>% dplyr::summarize(mean_ep=mean(ep_))
 
 #Convert edible quantity consumption to grams of protein consumption: gen protein =  ep_grams / 100 * protein_g
 foodrecall$gram_ep<- (foodrecall$ep_/100)*foodrecall$qty_gram_new
 
-#kcal estimate
-#as done in the slides but refuse is not from 0 to 1 so Proceeding like Mike mentioned in the email
-#foodrecall$kcal_JZM<-foodrecall$qty_gram_new*(1-((foodrecall$refuse_)/100))*foodrecall$energy_kcal
-summary(foodrecall$refuse_)
-colnames(foodrecall)
-unique(foodrecall$description)
+#convert units to edible quantities
 #nutrients are per 100g of food (got units from PNCD user guide):https://www.fao.org/3/cb0267en/cb0267en.pdf
 foodrecall<-foodrecall%>%mutate(kcal_JZM=gram_ep*(energy_kcal/100),
                                 protein_tg=gram_ep*(protein_g/100),
@@ -107,13 +103,8 @@ foodrecall<-foodrecall%>%mutate(kcal_JZM=gram_ep*(energy_kcal/100),
                                 iron_non_haem_tmg=gram_ep*(iron_non_haem/100),
                                 iron_haem_tmg=gram_ep*(iron_haem/100))
 
-ggplot(foodrecall,aes(x=kcal_JZM,y=kcal))+geom_point()+geom_abline(slope=1,intercept = 0)
 
-#refuse is the inverse to ep
-ggplot(foodrecall,aes(x=ep_,y=refuse_))+geom_point()+geom_abline(slope=1,intercept = 0)
-
-#get summaries by household: divide by 7 to get daily intake because questions where for 7 days
-colnames(foodrecall)
+#get nutrient inatke summaries by household: divide by 7 to get daily intake because questions were for 7 days
 hhfoodsummary<-ddply(foodrecall,.(interview__key),summarize,kcal_hh=sum(kcal_JZM,na.rm=T)/7,grams_hh=sum(gram_ep,na.rm=T)/7,hhsize=hhsize[1],island=as_factor(island[1]),village=as_factor(village[1]),
                     pr_g_hh=sum(protein_tg,na.rm=T)/7,tfats_g_hh=sum(total_fat_tg,na.rm=T)/7,carbs_g_hh=sum(carbs_tg,na.rm=T)/7,
                      fibre_g_hh=sum(tdfibre_tg,na.rm=T)/7,alcohol_g_hh=sum(alcohol_tg,na.rm=T)/7,ash_g_hh=sum(ash_tg,na.rm=T)/7,
@@ -126,41 +117,20 @@ hhfoodsummary<-ddply(foodrecall,.(interview__key),summarize,kcal_hh=sum(kcal_JZM
                     iron_haem_mg_hh=sum(iron_haem_tmg,na.rm=T)/7)
                     
                      
-#kcal obtained roughly per capita by dividing by household size (we expect high variation because 1 food recall but median values could be useful)
-summary(hhfoodsummary$kcal_hh/hhfoodsummary$hhsize)
-hist(log(hhfoodsummary$kcal_hh/hhfoodsummary$hhsize))
+#kcal obtained roughly per capita by dividing by household size, which assumes an even spread among individuals (we expect high variation because we have 1 food recall but median values could be useful)
 hhfoodsummary$pc_kcal<-hhfoodsummary$kcal_hh/hhfoodsummary$hhsize
-pckcal_h<-brm(log(pc_kcal)~1+ (1|island/village),data=hhfoodsummary, family="gaussian")
-pp_check(pckcal_h,nsamples=100)
-ranef_community<-as.data.frame(ranef(pckcal_h, groups="island:village", probs = c(0.1,0.9)))
-ranef_community$community<-row.names(ranef_community)
-colnames(ranef_community)<-c("estimate","se","conf.low","conf.high","community")
-
-a<-ggplot(hhfoodsummary,aes(x=pc_kcal,y=island))+geom_violin(draw_quantiles = c(0.5),fill="deeppink3",alpha=0.3)+theme_classic()+xlab("kcal per capita per day")+ylab("")+
-  geom_vline(xintercept = median(hhfoodsummary$pc_kcal),lty=2)
-
-b<-ggplot(ranef_community,aes(x=estimate,y=community,xmin=conf.low,xmax=conf.high))+geom_errorbar()+geom_point(fill="darkred",pch=21,size=3)+geom_vline(xintercept = 0,lty=2)+theme_classic()+xlab("Offset from intercept")
-
-ranef_island<-as.data.frame(ranef(pckcal_h, groups="island", probs = c(0.1,0.9)))
-ranef_island$island<-row.names(ranef_island)
-colnames(ranef_island)<-c("estimate","se","conf.low","conf.high","island")
-
-c<-ggplot(ranef_island,aes(x=estimate,y=island,xmin=conf.low,xmax=conf.high))+geom_errorbar()+geom_point(fill="darkred",pch=21,size=3)+geom_vline(xintercept = 0,lty=2)+theme_classic()+xlab("Offset from intercept")
-windows()
-ggarrange(a,b,c,nrow=1,ncol=3)
-#island level kcals in arithmetic scale
-country_kcal_intercept=exp(fixef(pckcal_h, probs = c(0.1,0.9))[,-2]+as.data.frame(ranef(pckcal_h, groups="island", probs = c(0.1,0.9)))[,-2])
-ggplot(country_kcal_intercept,aes(x=island.Estimate.Intercept,y=rownames(country_kcal_intercept),xmin=island.Q10.Intercept,xmax=island.Q90.Intercept))+geom_errorbar()+geom_point(fill="darkred",pch=21,size=3)+geom_vline(xintercept = exp(fixef(pckcal_h, probs = c(0.1,0.9))[1]),lty=2)+theme_classic()+xlab("Estimated mean per capita kilocalorie intake")+ylab("")
+hist(hhfoodsummary$pc_kcal)
 
 ###############################################################################
-#seafood contribution to nutritional intake
-#all foods divided by main groups
-colnames(foodrecall)
-unique(foodrecall$coicop_class)
+#estimating seafood's  contribution to nutritional intake
+#get total intake for each food group
 allfood_contribution<-foodrecall %>% select (interview__key,coicop_class,gram_ep,kcal_JZM:iron_haem_tmg) %>%
   group_by(interview__key,coicop_class)%>%summarise_all(sum,na.rm=T)
+#divide by 7 to get daily
 allfood_contribution[,3:ncol(allfood_contribution)]<-allfood_contribution[,3:ncol(allfood_contribution)]/7
+#merge to total intake
 allfood_contribution<-merge(allfood_contribution,(hhfoodsummary %>%select(interview__key,kcal_hh:iron_haem_mg_hh)),by="interview__key",all.x=T)
+#for each nutrient and food group, estimate the percent contribution of that food group to total nutrient intake (at a household level)
 allfood_contribution<-allfood_contribution %>%
   mutate(kcal=(kcal_JZM/kcal_hh)*100,
          grams=(gram_ep/grams_hh)*100,
@@ -189,19 +159,20 @@ allfood_contribution<-allfood_contribution %>%
          iron_haem=(iron_haem_tmg/iron_haem_mg_hh)*100)
 #put to long format
 allfood_contribution<-allfood_contribution %>% select(interview__key,coicop_class,kcal:iron_haem) %>% select(-vitA_RE) %>%gather(variable,value,-interview__key, -coicop_class)
+
+#plot percent of different food groups to household intake
 windows()
 ggplot(allfood_contribution)+geom_density_ridges_gradient(aes(x=value, y=variable,col=variable),fill="black",scale=2,rel_min_height = 0.01,alpha=0.5)+facet_wrap(~coicop_class,nrow=1,ncol=12)+
   xlab("% contribution to household intake")+ylab("")+theme(axis.text.y = element_text(size=9),panel.background = element_rect(fill="white",color="black"))+guides(col=F)
-ggplot(allfood_contribution)+geom_density_ridges_gradient(aes(x=value, y=coicop_class,col=coicop_class),fill="black",scale=2,rel_min_height = 0.01,alpha=0.5)+facet_wrap(~variable,nrow=3,ncol = 8)+
+ggplot(allfood_contribution)+geom_density_ridges_gradient(aes(x=value, y=as.factor(coicop_class),col=as.factor(coicop_class)),fill="black",scale=2,rel_min_height = 0.01,alpha=0.5)+facet_wrap(~variable,nrow=3,ncol = 8)+
   xlab("% contribution to household intake")+ylab("")+theme(axis.text.y = element_text(size=9),panel.background = element_rect(fill="white",color="black"))+guides(col=F)
 
-#ranking of food groups
+#ranking of food groups based on mean
 allfood_contribution_rank<-allfood_contribution[,-1] %>% group_by(coicop_class,variable) %>%summarise_all(mean,na.rm=T)%>% group_by(variable) %>%mutate(ranking=order(order(value,variable,decreasing=T)))%>% filter(variable!="cholesterol")
 allfood_contribution_rank<-droplevels(allfood_contribution_rank) 
 #raster plot
 rank_sum<-as.data.frame(allfood_contribution_rank %>% group_by(coicop_class) %>%dplyr::summarise(ranking_sum=sum(ranking)) %>%arrange(ranking_sum))
 rank_sum$coicop_class <- reorder(rank_sum$coicop_class, rank_sum$ranking_sum)
-levels(rank_sum$coicop_class)
 rank_variables<-as.data.frame(allfood_contribution_rank %>% filter(coicop_class %in% "Fish and sea food") %>%arrange(desc(value)))
 rank_variables$variable <- reorder(as.factor(rank_variables$variable), rank_variables$value)
 
@@ -277,8 +248,10 @@ allfoodcont_fig<-ggplot(allfood_contribution_rank, aes(x = variable, y = coicop_
                                                                    iron_haem="Haem iron"))+coord_flip()
 
 
+#table for paper
 
-
+rempsyc::nice_table( allfood_contribution_rank%>% select(-ranking) %>%
+  pivot_wider(names_from = variable, values_from = value) %>%arrange(desc(niacin)))
 #seafood summary
 unique(foodrecall$Food_description_HIES)
 unique(as_factor(foodrecall$coicop_class))
