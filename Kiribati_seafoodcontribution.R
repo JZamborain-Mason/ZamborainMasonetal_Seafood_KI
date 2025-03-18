@@ -249,12 +249,11 @@ allfoodcont_fig<-ggplot(allfood_contribution_rank, aes(x = variable, y = coicop_
 
 
 #table for paper
-
 rempsyc::nice_table( allfood_contribution_rank%>% select(-ranking) %>%
   pivot_wider(names_from = variable, values_from = value) %>%arrange(desc(niacin)))
+#write.csv(allfood_contribution_rank%>% select(-ranking) %>% pivot_wider(names_from = variable, values_from = value) %>%arrange(desc(niacin)), "TableS1.csv",row.names=F)
+
 #seafood summary
-unique(foodrecall$Food_description_HIES)
-unique(as_factor(foodrecall$coicop_class))
 foodrecall$coicop_class<-as_factor(foodrecall$coicop_class)
 seafood2<-foodrecall[foodrecall$coicop_class=="Fish and sea food",]
 unique(seafood2$Food_description_HIES)
@@ -286,7 +285,7 @@ hhfoodsummary[is.na(hhfoodsummary)]<-0
 #340 weekly grams of seafood upper limit for 12 ounces per week to minimize exposure to methyl mercury (FDA/EPA, 2004)
 #for pregnant women, women planning to become pregnant, nursing mothers, and young children
 #https://www.ncbi.nlm.nih.gov/books/NBK305180/
-
+#plot histogram of seafood consumption (assuming an even spread among household members)
 windows()
 ggplot(hhfoodsummary,aes(x=gseafood_pc))+geom_histogram(alpha=0.5)+geom_vline(xintercept = 340/7,lty=2)+xlab("Per capita daily grams of seafood consumed")+theme_classic()
 
@@ -980,7 +979,7 @@ perc_contribution_seaweed2<- within(perc_contribution_seaweed2,
                                                       levels=levels(fac2)))
 
 
-#calcultae median contributions for each seafood group
+#calcultae mean contributions for each seafood group
 seafoodgroup_contribution<-rbind(perc_contribution_reeffish2%>%group_by(variable)%>%summarise_all(mean,na.rm=T) %>%mutate(seafood_group=rep("Reef fish",ncol(perc_contribution_reeffish) )),
       perc_contribution_fishnoreef2%>%group_by(variable)%>%summarise_all(mean,na.rm=T) %>%mutate(seafood_group=rep("Pelagic & other fish",ncol(perc_contribution_fishnoreef) )),
       perc_contribution_driedfish2%>%group_by(variable)%>%summarise_all(mean,na.rm=T) %>%mutate(seafood_group=rep("Dried & salted fish",ncol(perc_contribution_driedfish) )),
@@ -990,7 +989,7 @@ seafoodgroup_contribution<-rbind(perc_contribution_reeffish2%>%group_by(variable
       perc_contribution_seaweed2%>%group_by(variable)%>%summarise_all(mean,na.rm=T) %>%mutate(seafood_group=rep("Seaweed",ncol(perc_contribution_seaweed) )))
 seafoodgroup_contribution[is.na(seafoodgroup_contribution)]<-0
 #ranking of food groups
-seafoodgroup_contribution_rank<-seafoodgroup_contribution%>% group_by(variable) %>%mutate(ranking=order(order(value,variable,decreasing=T)))%>% filter(variable!="cholesterol")
+seafoodgroup_contribution_rank<-seafoodgroup_contribution%>% filter(variable!="Cholesterol")%>% group_by(variable) %>%mutate(ranking=order(order(value,variable,decreasing=T)))
 seafoodgroup_contribution_rank<-droplevels(seafoodgroup_contribution_rank)
 #raster plot
 seafoodgrouprank_sum<-as.data.frame(seafoodgroup_contribution_rank %>% group_by(seafood_group) %>%dplyr::summarise(ranking_sum=sum(ranking)) %>%arrange(ranking_sum))
@@ -1008,7 +1007,7 @@ seafoodgrouprank_fig<-ggplot(seafoodgroup_contribution_rank, aes(x = variable, y
     #legend.position="left",
         plot.margin = ggplot2::margin(t = 0.18, r = 0, b = 0.89, l = 0, "cm"),
         panel.grid = element_blank())+ylim(levels(seafoodgrouprank_sum$seafood_group))+
-  scale_x_discrete(limits=c("Non-haem iron","Carbohydrates","Fibre","Vitamin C","Betacaroten","Kcal","Sodium","Thiamin","Zinc","Total fats","Calcium","Total iron","Potassium","Magnesium","Rivoflavin","Vitamin E","Protein","Vitamin A (RAE)","Niacin","Retinol","Cholesterol","Haem iron","Vitamin B12","Grams"))+coord_flip()
+  scale_x_discrete(limits=c("Non-haem iron","Carbohydrates","Fibre","Vitamin C","Betacaroten","Kcal","Sodium","Thiamin","Zinc","Total fats","Calcium","Total iron","Potassium","Magnesium","Rivoflavin","Vitamin E","Protein","Vitamin A (RAE)","Niacin","Retinol","Haem iron","Vitamin B12","Grams"))+coord_flip()
 
 seafoodgroupcont_fig<-ggplot(seafoodgroup_contribution_rank, aes(x = variable, y = seafood_group, fill = value))+
   geom_tile(colour = "white", size = 0.1, height = 1) +
@@ -1020,13 +1019,20 @@ seafoodgroupcont_fig<-ggplot(seafoodgroup_contribution_rank, aes(x = variable, y
         #panel.background = element_rect(fill = 'black'),
         plot.margin = ggplot2::margin(t = 0.18, r = 0, b = 0.89, l = 0, "cm"),
         panel.grid = element_blank(), axis.text.y=element_blank())+ylim(levels(seafoodgrouprank_sum$seafood_group))+
-  scale_x_discrete(limits=c("Non-haem iron","Carbohydrates","Fibre","Vitamin C","Betacaroten","Kcal","Sodium","Thiamin","Zinc","Total fats","Calcium","Total iron","Potassium","Magnesium","Rivoflavin","Vitamin E","Protein","Vitamin A (RAE)","Niacin","Retinol","Cholesterol","Haem iron","Vitamin B12","Grams"))+coord_flip()
+  scale_x_discrete(limits=c("Non-haem iron","Carbohydrates","Fibre","Vitamin C","Betacaroten","Kcal","Sodium","Thiamin","Zinc","Total fats","Calcium","Total iron","Potassium","Magnesium","Rivoflavin","Vitamin E","Protein","Vitamin A (RAE)","Niacin","Retinol","Haem iron","Vitamin B12","Grams"))+coord_flip()
+
+#table for paper
+rempsyc::nice_table(seafoodgroup_contribution_rank%>% select(-ranking) %>%
+                       pivot_wider(names_from = variable, values_from = value) %>%arrange(desc(Niacin)))
+#write.csv(seafoodgroup_contribution_rank%>% select(-ranking) %>%pivot_wider(names_from = variable, values_from = value) %>%arrange(desc(Niacin)), "TableS2.csv",row.names=F)
 
 
+
+#manuscript figures
+#fig 1
 ggarrange(allfoodcont_fig,seafoodgroupcont_fig,widths=c(1.5,1))
-windows()
+#fig s1
 ggarrange(rank_allfoods_fig,seafoodgrouprank_fig,widths=c(1.3,1))
-
 
 #observed variability figure
 windows()
@@ -1056,6 +1062,8 @@ g<-ggplot(NULL)+  geom_boxplot(data=perc_contribution_driedfish2%>%filter(variab
 seafoodgroups_fig<-annotate_figure(ggarrange(a,b,c,d,g,e,f,nrow=1,ncol=7))
 windows()
 annotate_figure(ggarrange(allseafoodcont_fig2,seafoodgroups_fig, widths=c(0.5,1.5),labels=c("a","b"),nrow=1,ncol=2), bottom=" % contribution to household intake")
+
+
 
 ###############################################################################
 #contribution of seafood to nutritional adequacy________________________________
@@ -1256,7 +1264,11 @@ hhfoodsummary_indui<- hhfoodsummary_indui %>%
          hh_VE_rel_ui_seafood=VitE_mug_seafood_hh/Vitamin.E_indui)
 
 
+#reviewer comment: relationship between seafood consumption and sodium and carb intake (or adequacy)
 
+a<-ggplot(hhfoodsummary_indrda,aes(x=sqrt(grams_seafood_hh),y=sqrt(hh_sodium_adeq)))+geom_point()+geom_smooth(method="gam")+geom_hline(yintercept = 1,lty=2)+xlab("Grams of seafood consumed per household (sqrt)")+ylab("Household sodium adequacy")
+b<-ggplot(hhfoodsummary_indrda,aes(x=sqrt(grams_seafood_hh),y=sqrt(hh_carbs_adeq)))+geom_point()+geom_smooth(method="gam")+geom_hline(yintercept = 1,lty=2)+xlab("Grams of seafood consumed per household (sqrt)")+ylab("Household carbohydrate adequacy")
+ggarrange(a,b)
 #estimate a nutrient adequacy index (i.e., how many nutrients besides kcal households are meeting in terms of adequacy )
 colnames(hhfoodsummary_indrda)
 hhfoodsummary_indrda<-hhfoodsummary_indrda %>%
