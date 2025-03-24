@@ -12,12 +12,12 @@ library(plyr)
 library(ggpubr)
 library(ggridges)
 library(knitr)
-library(rworldmap)
 library (haven)  #to read stata files
 library(tidyverse)
 library(brms)
 library(rstan)
 library(dplyr)
+
 #make rstan work with all cores
 rstan_options(auto_write = T)
 options(mc.cores = parallel::detectCores())
@@ -43,38 +43,44 @@ panel.hist <- function(x, ...)
   rect(breaks[-nB], 0, breaks[-1], y, col = "grey", ...)
 }
 
-#data: HIES expenditure data
+#data: HIES expenditure data (accessed through a data use agreement)
 expenditure<-read_dta("30_ExpenditureAggregate.dta")
 
 #get only food recall data
 foodrecall<-expenditure[expenditure$section=="21_foodrecall",]
 foodrecall<-droplevels(foodrecall)
 
-#Pacific Nutrient Composition DataBase 2020
+#Pacific Nutrient Composition DataBase 2020 (accessed through a data use agreement)
 #PNDB are for 100 grams of edible portion.
 pnsb<-read_dta("PNSB_March2022.dta")
 
 #merge nutrient and food data
 foodrecall<-merge(foodrecall, pnsb,by="pndbcode",all.x=T)
 
-#make sure we keep the labels of coicop classes
+#make sure we keep the labels of coicop classes (food groups)
 coicop_labels<-stack(attr(foodrecall$coicop_class, 'labels'))
 colnames(coicop_labels)<-c("coicop_class_value","coicop_class")
 foodrecall<-foodrecall %>%rename("coicop_class_value"="coicop_class") %>%left_join(coicop_labels, by="coicop_class_value")
 
-#descriptions in restaurants cafes
-foodrecall$Food_description_HIES[foodrecall$coicop_class=="Restaurants, cafes and the like"]
+#check descriptions in restaurants cafes (based on reviewer's comment)
+table(foodrecall$Food_description_HIES[foodrecall$coicop_class=="Restaurants, cafes and the like"])
+table(foodrecall$food_desc_pndb[foodrecall$coicop_class=="Restaurants, cafes and the like"])
+table(foodrecall$data_source[foodrecall$coicop_class=="Restaurants, cafes and the like"])
+table(foodrecall$type_of_data[foodrecall$coicop_class=="Restaurants, cafes and the like"])
 
-#description of other food products
+#change the coicop class "restaurants cafe and the like" for "prepared meals", given the reviewer's comment and Mike Sharp's insights
+foodrecall$coicop_class<-as.factor(ifelse(foodrecall$coicop_class=="Restaurants, cafes and the like", "Prepared meals",as.character(foodrecall$coicop_class)))
+
+#check description of other food products
 summary(as.factor(foodrecall$Food_description_HIES[foodrecall$coicop_class=="Food products n.e.c."]))
 
 #check edible portions for aquatic food groupings
 foodrecall %>%dplyr::filter(coicop_class=="Fish and sea food") %>% dplyr::select (ep_, Food_description_HIES) %>%dplyr::group_by(Food_description_HIES) %>% dplyr::summarize(mean_ep=mean(ep_))
 
-#Convert edible quantity consumption to grams of protein consumption: gen protein =  ep_grams / 100 * protein_g
+#Convert quantity to edible quantity c: ediblegrams =  ep_grams / 100 * grams
 foodrecall$gram_ep<- (foodrecall$ep_/100)*foodrecall$qty_gram_new
 
-#convert units to edible quantities
+#convert nutrient intake to edible quantities
 #nutrients are per 100g of food (got units from PNCD user guide):https://www.fao.org/3/cb0267en/cb0267en.pdf
 foodrecall<-foodrecall%>%mutate(kcal_JZM=gram_ep*(energy_kcal/100),
                                 protein_tg=gram_ep*(protein_g/100),
@@ -99,12 +105,12 @@ foodrecall<-foodrecall%>%mutate(kcal_JZM=gram_ep*(energy_kcal/100),
                                 Vit_B12_tmug=gram_ep*(Vit_B12/100),
                                 Vit_C_tmg=gram_ep*(Vit_C/100),
                                 VitE_tmug=gram_ep*(VitE/100),
-                                cholesterol_tmg=gram_ep*(cholesterol_mg/100),
+                                cholesterol_tmg=gram_ep*(cholesterol_mg/100), #note this is not used in the analyses because we synthesize it
                                 iron_non_haem_tmg=gram_ep*(iron_non_haem/100),
                                 iron_haem_tmg=gram_ep*(iron_haem/100))
 
 
-#get nutrient inatke summaries by household: divide by 7 to get daily intake because questions were for 7 days
+#get nutrient intake summaries by household: divide by 7 to get daily intake because questions were for 7 days
 hhfoodsummary<-ddply(foodrecall,.(interview__key),summarize,kcal_hh=sum(kcal_JZM,na.rm=T)/7,grams_hh=sum(gram_ep,na.rm=T)/7,hhsize=hhsize[1],island=as_factor(island[1]),village=as_factor(village[1]),
                     pr_g_hh=sum(protein_tg,na.rm=T)/7,tfats_g_hh=sum(total_fat_tg,na.rm=T)/7,carbs_g_hh=sum(carbs_tg,na.rm=T)/7,
                      fibre_g_hh=sum(tdfibre_tg,na.rm=T)/7,alcohol_g_hh=sum(alcohol_tg,na.rm=T)/7,ash_g_hh=sum(ash_tg,na.rm=T)/7,
@@ -117,12 +123,14 @@ hhfoodsummary<-ddply(foodrecall,.(interview__key),summarize,kcal_hh=sum(kcal_JZM
                     iron_haem_mg_hh=sum(iron_haem_tmg,na.rm=T)/7)
                     
                      
-#kcal obtained roughly per capita by dividing by household size, which assumes an even spread among individuals (we expect high variation because we have 1 food recall but median values could be useful)
+#kcal obtained roughly per capita by dividing by household size, which assumes an even spread among individuals (we expect high variation because we have 1 food recall but mean values could be useful)
 hhfoodsummary$pc_kcal<-hhfoodsummary$kcal_hh/hhfoodsummary$hhsize
-hist(hhfoodsummary$pc_kcal)
 
-###############################################################################
-#estimating seafood's  contribution to nutritional intake
+
+################################################################################
+#estimating the contribution of aquatic foods to nutritional intake
+################################################################################
+
 #get total intake for each food group
 allfood_contribution<-foodrecall %>% select (interview__key,coicop_class,gram_ep,kcal_JZM:iron_haem_tmg) %>%
   group_by(interview__key,coicop_class)%>%summarise_all(sum,na.rm=T)
@@ -167,15 +175,15 @@ ggplot(allfood_contribution)+geom_density_ridges_gradient(aes(x=value, y=variabl
 ggplot(allfood_contribution)+geom_density_ridges_gradient(aes(x=value, y=as.factor(coicop_class),col=as.factor(coicop_class)),fill="black",scale=2,rel_min_height = 0.01,alpha=0.5)+facet_wrap(~variable,nrow=3,ncol = 8)+
   xlab("% contribution to household intake")+ylab("")+theme(axis.text.y = element_text(size=9),panel.background = element_rect(fill="white",color="black"))+guides(col=F)
 
-#ranking of food groups based on mean
+#estimate ranking of food groups based on mean
 allfood_contribution_rank<-allfood_contribution[,-1] %>% group_by(coicop_class,variable) %>%summarise_all(mean,na.rm=T)%>% group_by(variable) %>%mutate(ranking=order(order(value,variable,decreasing=T)))%>% filter(variable!="cholesterol")
 allfood_contribution_rank<-droplevels(allfood_contribution_rank) 
-#raster plot
+
+#raster plots
 rank_sum<-as.data.frame(allfood_contribution_rank %>% group_by(coicop_class) %>%dplyr::summarise(ranking_sum=sum(ranking)) %>%arrange(ranking_sum))
 rank_sum$coicop_class <- reorder(rank_sum$coicop_class, rank_sum$ranking_sum)
 rank_variables<-as.data.frame(allfood_contribution_rank %>% filter(coicop_class %in% "Fish and sea food") %>%arrange(desc(value)))
 rank_variables$variable <- reorder(as.factor(rank_variables$variable), rank_variables$value)
-
 rank_variables <-rank_variables %>%mutate(variable=fct_relevel(variable,"grams",after=Inf))
 rank_allfoods_fig<-ggplot(allfood_contribution_rank , aes(x = variable, y = coicop_class, fill = as.factor(ranking)))+
   geom_tile(colour = "white", size = 0.1, height = 1) +
@@ -248,14 +256,16 @@ allfoodcont_fig<-ggplot(allfood_contribution_rank, aes(x = variable, y = coicop_
                                                                    iron_haem="Haem iron"))+coord_flip()
 
 
-#table for paper
+#supplementary table for paper
 rempsyc::nice_table( allfood_contribution_rank%>% select(-ranking) %>%
   pivot_wider(names_from = variable, values_from = value) %>%arrange(desc(niacin)))
 #write.csv(allfood_contribution_rank%>% select(-ranking) %>% pivot_wider(names_from = variable, values_from = value) %>%arrange(desc(niacin)), "TableS1.csv",row.names=F)
 
-#seafood summary
+#aquatic food summaries______________________________________________________________
 foodrecall$coicop_class<-as_factor(foodrecall$coicop_class)
 seafood2<-foodrecall[foodrecall$coicop_class=="Fish and sea food",]
+
+#check unique aquatic food groupings
 unique(seafood2$Food_description_HIES)
 unique(seafood2$description)
 seafood2$Food_description_HIES[seafood2$description=="Lagoon and sandflat fish (fresh or frozen)"]
@@ -266,6 +276,7 @@ unique(seafood2$description[seafood2$Food_description_HIES=="Snapper"])
 #check descriptions
 seafood2 %>% dplyr::select(Food_description_HIES, description) %>% dplyr::group_by(Food_description_HIES) %>% dplyr::summarize(desciptions=paste(unique(description), collapse = ', '))
 
+#calcultae contributions of aquatic foods
 seafood<-ddply(seafood2,.(interview__key),summarize,gseafood_pc=sum(gram_ep)/7/hhsize[1],
                kcal_seafood_hh=sum(kcal_JZM,na.rm=T)/7,grams_seafood_hh=sum(gram_ep)/7,
                pr_g_seafood_hh=sum(protein_tg,na.rm=T)/7,tfats_g_seafood_hh=sum(total_fat_tg,na.rm=T)/7,carbs_g_seafood_hh=sum(carbs_tg,na.rm=T)/7,
@@ -287,11 +298,10 @@ hhfoodsummary[is.na(hhfoodsummary)]<-0
 #https://www.ncbi.nlm.nih.gov/books/NBK305180/
 #plot histogram of seafood consumption (assuming an even spread among household members)
 windows()
-ggplot(hhfoodsummary,aes(x=gseafood_pc))+geom_histogram(alpha=0.5)+geom_vline(xintercept = 340/7,lty=2)+xlab("Per capita daily grams of seafood consumed")+theme_classic()
+ggplot(hhfoodsummary,aes(x=gseafood_pc))+geom_histogram(alpha=0.5)+geom_vline(xintercept = 340/7,lty=2)+xlab("Per capita daily grams of aquatic foods consumed")+theme_classic()
 
 
-
-#for each household: what proportion of each dietary nutrients comes from seafood
+#for each household: what proportion of each dietary nutrients comes from aquatic foods?
 #seafood dependence
 hhfoodsummary<- hhfoodsummary %>%
   mutate(perc_kcal_hh_seafood=(kcal_seafood_hh/kcal_hh)*100,
@@ -342,13 +352,7 @@ allseafoodcont_fig2<-ggplot(NULL)+  stat_density_ridges(data=perc_contribution2 
   theme(panel.background = element_rect(fill="white",color="black"))+ggtitle ("Fish and seafood")+xlim(c(0,100))
 
 
-ggarrange(allfoodcont_fig,allseafoodcont_fig2)
-
-
-
-#contribution per seafood group
-unique(seafood2$Food_description_HIES)
-
+#contribution per aquatic food group_________________________________________________
 #create groups
 seafood2$seafood_group<-ifelse(seafood2$Food_description_HIES=="Tuna canned, not further specified"|seafood2$Food_description_HIES=="Mackerel, canned, not further specified","Tinned fish",
                                ifelse(seafood2$Food_description_HIES=="Fish, pelagic/ocean, not further specified"|seafood2$Food_description_HIES=="Snapper"|(seafood2$Food_description_HIES=="Fish, not further specified" &!seafood2$description=="Lagoon and sandflat fish (fresh or frozen)"), "Pelagic & other fish",
@@ -359,9 +363,7 @@ seafood2$seafood_group<-ifelse(seafood2$Food_description_HIES=="Tuna canned, not
                                
 
 
-#non tinned seafood, reef fish, invertebrates and sharks and rays consumpton
-unique(seafood2$Food_description_HIES)
-unique(as_factor(foodrecall$coicop_class))
+#tinned aquatic foods
 tinnedsf<-foodrecall[foodrecall$coicop_class=="Fish and sea food"& (foodrecall$Food_description_HIES=="Tuna canned, not further specified"|foodrecall$Food_description_HIES=="Mackerel, canned, not further specified"),]
 tinnedsf<-ddply(tinnedsf,.(interview__key),summarize,gtinnedsf_pc=sum(gram_ep)/7/hhsize[1],
                kcal_tinnedsf_hh=sum(kcal_JZM,na.rm=T)/7, grams_tinnedsf_hh=sum(gram_ep,na.rm=T)/7,
@@ -375,7 +377,7 @@ tinnedsf<-ddply(tinnedsf,.(interview__key),summarize,gtinnedsf_pc=sum(gram_ep)/7
                VitE_mug_tinnedsf_hh=sum(VitE_tmug,na.rm=T)/7,cholesterol_mg_tinnedsf_hh=sum(cholesterol_tmg,na.rm=T)/7,iron_non_haem_mg_tinnedsf_hh=sum(iron_non_haem_tmg,na.rm=T)/7,
                iron_haem_mg_tinnedsf_hh=sum(iron_haem_tmg,na.rm=T)/7)
 
-
+#merge to hh-level data
 hhfoodsummary<-merge(hhfoodsummary,tinnedsf,by="interview__key",all.x=T)
 hhfoodsummary[is.na(hhfoodsummary)]<-0
 
@@ -445,14 +447,15 @@ perc_contribution_tinnedsf2<- within(perc_contribution_tinnedsf2,
                                     variable<- factor(variable, 
                                                       levels=levels(fac2)))
 
-#other fish (not reef)--snapper included here
+#pelagic and other fish (not reef)-- deep water snapper is included here_________
 fishnoreef<-foodrecall[foodrecall$coicop_class=="Fish and sea food"& (foodrecall$Food_description_HIES=="Fish, pelagic/ocean, not further specified"|foodrecall$Food_description_HIES=="Snapper"|(foodrecall$Food_description_HIES=="Fish, not further specified" &!foodrecall$description=="Lagoon and sandflat fish (fresh or frozen)")),]
 summary(as.factor(fishnoreef$description))
 summary(as.factor(fishnoreef$Food_description_HIES[fishnoreef$description=="Sea worm"]))
 
-#seaworms missclassified
+#seaworms were missclassified
 fishnoreef<-fishnoreef %>%filter(description!="Sea worm")
 
+#get summaries at a household level
 fishnoreef<-ddply(fishnoreef,.(interview__key),summarize,gfishnoreef_pc=sum(gram_ep)/7/hhsize[1],
                kcal_fishnoreef_hh=sum(kcal_JZM,na.rm=T)/7,grams_fishnoreef_hh=sum(gram_ep,na.rm=T)/7,
                pr_g_fishnoreef_hh=sum(protein_tg,na.rm=T)/7,tfats_g_fishnoreef_hh=sum(total_fat_tg,na.rm=T)/7,carbs_g_fishnoreef_hh=sum(carbs_tg,na.rm=T)/7,
@@ -464,14 +467,10 @@ fishnoreef<-ddply(fishnoreef,.(interview__key),summarize,gfishnoreef_pc=sum(gram
                niacin_mg_fishnoreef_hh=sum(niacin_tmg,na.rm=T)/7,Vit_B12_mug_fishnoreef_hh=sum(Vit_B12_tmug,na.rm=T)/7,Vit_C_mg_fishnoreef_hh=sum(Vit_C_tmg,na.rm=T)/7,
                VitE_mug_fishnoreef_hh=sum(VitE_tmug,na.rm=T)/7,cholesterol_mg_fishnoreef_hh=sum(cholesterol_tmg,na.rm=T)/7,iron_non_haem_mg_fishnoreef_hh=sum(iron_non_haem_tmg,na.rm=T)/7,
                iron_haem_mg_fishnoreef_hh=sum(iron_haem_tmg,na.rm=T)/7)
-
-
-
 hhfoodsummary<-merge(hhfoodsummary,fishnoreef,by="interview__key",all.x=T)
 hhfoodsummary[is.na(hhfoodsummary)]<-0
 
-#for each household: what proportion of each dietary nutrients comes from fishnoreef
-#fishnoreef dependence
+#for each household: what proportion of each dietary nutrients comes from pelagic and otehr fish?
 hhfoodsummary<- hhfoodsummary %>%
   mutate(perc_kcal_hh_fishnoreef=(kcal_fishnoreef_hh/kcal_seafood_hh)*100,
          perc_grams_hh_fishnoreef=(grams_fishnoreef_hh/grams_seafood_hh)*100,
@@ -534,7 +533,7 @@ perc_contribution_fishnoreef2<- within(perc_contribution_fishnoreef2,
                                     variable<- factor(variable, 
                                                       levels=levels(fac2)))
 
-#dried fish
+#dried and salted fish__________________________________________________________
 driedfish<-foodrecall[foodrecall$coicop_class=="Fish and sea food"& foodrecall$Food_description_HIES=="Fish, dried, salted",]
 driedfish<-ddply(driedfish,.(interview__key),summarize,gdriedfish_pc=sum(gram_ep)/7/hhsize[1],
                 kcal_driedfish_hh=sum(kcal_JZM,na.rm=T)/7,grams_driedfish_hh=sum(gram_ep,na.rm=T)/7,
@@ -547,13 +546,10 @@ driedfish<-ddply(driedfish,.(interview__key),summarize,gdriedfish_pc=sum(gram_ep
                 niacin_mg_driedfish_hh=sum(niacin_tmg,na.rm=T)/7,Vit_B12_mug_driedfish_hh=sum(Vit_B12_tmug,na.rm=T)/7,Vit_C_mg_driedfish_hh=sum(Vit_C_tmg,na.rm=T)/7,
                 VitE_mug_driedfish_hh=sum(VitE_tmug,na.rm=T)/7,cholesterol_mg_driedfish_hh=sum(cholesterol_tmg,na.rm=T)/7,iron_non_haem_mg_driedfish_hh=sum(iron_non_haem_tmg,na.rm=T)/7,
                 iron_haem_mg_driedfish_hh=sum(iron_haem_tmg,na.rm=T)/7)
-
-
 hhfoodsummary<-merge(hhfoodsummary,driedfish,by="interview__key",all.x=T)
 hhfoodsummary[is.na(hhfoodsummary)]<-0
 
-#for each household: what proportion of each dietary nutrients comes from driedfish
-#driedfish dependence
+#for each household: what proportion of each dietary nutrients comes from dried and salted aquatic foods?
 hhfoodsummary<- hhfoodsummary %>%
   mutate(perc_kcal_hh_driedfish=(kcal_driedfish_hh/kcal_seafood_hh)*100,
          perc_grams_hh_driedfish=(grams_driedfish_hh/grams_seafood_hh)*100,
@@ -617,9 +613,8 @@ perc_contribution_driedfish2<- within(perc_contribution_driedfish2,
                                      variable<- factor(variable, 
                                                        levels=levels(fac2)))
 
-#reef fish
+#reef fish______________________________________________________________________
 reeffish<-foodrecall[foodrecall$coicop_class=="Fish and sea food"& (foodrecall$Food_description_HIES=="Fish, reef, not further specified"|(foodrecall$Food_description_HIES=="Fish, not further specified" &foodrecall$description=="Lagoon and sandflat fish (fresh or frozen)")),]
-summary(as.factor(reeffish$description))
 
 reeffish<-ddply(reeffish,.(interview__key),summarize,greeffish_pc=sum(gram_ep)/7/hhsize[1],
                kcal_reeffish_hh=sum(kcal_JZM,na.rm=T)/7,grams_reeffish_hh=sum(gram_ep,na.rm=T)/7,
@@ -632,13 +627,10 @@ reeffish<-ddply(reeffish,.(interview__key),summarize,greeffish_pc=sum(gram_ep)/7
                niacin_mg_reeffish_hh=sum(niacin_tmg,na.rm=T)/7,Vit_B12_mug_reeffish_hh=sum(Vit_B12_tmug,na.rm=T)/7,Vit_C_mg_reeffish_hh=sum(Vit_C_tmg,na.rm=T)/7,
                VitE_mug_reeffish_hh=sum(VitE_tmug,na.rm=T)/7,cholesterol_mg_reeffish_hh=sum(cholesterol_tmg,na.rm=T)/7,iron_non_haem_mg_reeffish_hh=sum(iron_non_haem_tmg,na.rm=T)/7,
                iron_haem_mg_reeffish_hh=sum(iron_haem_tmg,na.rm=T)/7)
-
-
 hhfoodsummary<-merge(hhfoodsummary,reeffish,by="interview__key",all.x=T)
 hhfoodsummary[is.na(hhfoodsummary)]<-0
 
-#for each household: what proportion of each dietary nutrients comes from reeffish
-#reeffish dependence
+#for each household: what proportion of each dietary nutrients comes from reef fish
 hhfoodsummary<- hhfoodsummary %>%
   mutate(perc_kcal_hh_reeffish=(kcal_reeffish_hh/kcal_seafood_hh)*100,
          perc_grams_hh_reeffish=(grams_reeffish_hh/grams_seafood_hh)*100,
@@ -692,13 +684,14 @@ hhfoodsummary<- hhfoodsummary %>%
          perc_cholesterol_hh_reeffish=(cholesterol_mg_reeffish_hh/cholesterol_mg_hh)*100,
          perc_iron_non_haem_hh_reeffish=(iron_non_haem_mg_reeffish_hh/iron_non_haem_mg_hh)*100,
          perc_iron_haem_hh_reeffish=(iron_haem_mg_reeffish_hh/iron_haem_mg_hh)*100)
+
+#checks
 ggplot(hhfoodsummary,aes(x=perc_kcal_hh_reeffish,y=island))+geom_density_ridges(quantile_lines = TRUE, quantiles = 2,scale=0.99,rel_min_height = 0.01)+xlim(c(0,100))+
   geom_vline(xintercept = median(hhfoodsummary$perc_kcal_hh_reeffish,na.rm=T),lty=2)+ xlab("% of seafood hhld Kcal from reef fish")+ylab("")+
   ggtitle(paste("Median=",round(median(hhfoodsummary$perc_kcal_hh_reeffish,na.rm=T)),"%"))+  theme(panel.background = element_rect(fill="white",colour="black"))
 ggplot(hhfoodsummary,aes(x=perc_kcal_hh_fishnoreef,y=island))+geom_density_ridges(quantile_lines = TRUE, quantiles = 2,scale=0.99,rel_min_height = 0.01)+xlim(c(0,100))+
   geom_vline(xintercept = median(hhfoodsummary$perc_kcal_hh_fishnoreef,na.rm=T),lty=2)+ xlab("% of seafood hhld Kcal from non reef fish")+ylab("")+
   ggtitle(paste("Median=",round(median(hhfoodsummary$perc_kcal_hh_fishnoreef,na.rm=T)),"%"))+  theme(panel.background = element_rect(fill="white",colour="black"))
-
 
 #percents overall
 perc_contribution_reeffish<-hhfoodsummary %>%
@@ -710,14 +703,13 @@ perc_contribution_reeffish2<- within(perc_contribution_reeffish2,
                                                       levels=levels(fac2)))
 
 
-#invertebrates
+#invertebrates__________________________________________________________________
 inverts<-foodrecall[foodrecall$coicop_class=="Fish and sea food"& (foodrecall$Food_description_HIES=="Crab, coconut"|
                                                                      foodrecall$Food_description_HIES=="Crab, not further specified"|foodrecall$Food_description_HIES=="Crayfish / lobster, not further specified"|                        
                                                                    foodrecall$Food_description_HIES=="Mussels"|foodrecall$Food_description_HIES=="Octopus"|                                                          
                                                                    foodrecall$Food_description_HIES=="Scallop"|foodrecall$Food_description_HIES=="Squid, not further specified"|                                   
                                                                    foodrecall$Food_description_HIES=="Trochus"|foodrecall$Food_description_HIES=="Sea-hare, not further specified"|
                                                                    foodrecall$Food_description_HIES=="Fish, not further specified"& foodrecall$description=="Sea worm"),]
-summary(as.factor(inverts$description))
 
 inverts<-ddply(inverts,.(interview__key),summarize,ginverts_pc=sum(gram_ep)/7/hhsize[1],
                kcal_inverts_hh=sum(kcal_JZM,na.rm=T)/7,
@@ -731,13 +723,10 @@ inverts<-ddply(inverts,.(interview__key),summarize,ginverts_pc=sum(gram_ep)/7/hh
                niacin_mg_inverts_hh=sum(niacin_tmg,na.rm=T)/7,Vit_B12_mug_inverts_hh=sum(Vit_B12_tmug,na.rm=T)/7,Vit_C_mg_inverts_hh=sum(Vit_C_tmg,na.rm=T)/7,
                VitE_mug_inverts_hh=sum(VitE_tmug,na.rm=T)/7,cholesterol_mg_inverts_hh=sum(cholesterol_tmg,na.rm=T)/7,iron_non_haem_mg_inverts_hh=sum(iron_non_haem_tmg,na.rm=T)/7,
                iron_haem_mg_inverts_hh=sum(iron_haem_tmg,na.rm=T)/7)
-
-
 hhfoodsummary<-merge(hhfoodsummary,inverts,by="interview__key",all.x=T)
 hhfoodsummary[is.na(hhfoodsummary)]<-0
 
-#for each household: what proportion of each dietary nutrients comes from inverts
-#inverts dependence
+#for each household: what proportion of each dietary nutrients come from inverts?
 hhfoodsummary<- hhfoodsummary %>%
   mutate(perc_kcal_hh_inverts=(kcal_inverts_hh/kcal_seafood_hh)*100,
          perc_grams_hh_inverts=(grams_inverts_hh/grams_seafood_hh)*100,
@@ -792,6 +781,7 @@ hhfoodsummary<- hhfoodsummary %>%
          perc_iron_non_haem_hh_inverts=(iron_non_haem_mg_inverts_hh/iron_non_haem_mg_hh)*100,
          perc_iron_haem_hh_inverts=(iron_haem_mg_inverts_hh/iron_haem_mg_hh)*100)
 
+#check
 ggplot(hhfoodsummary,aes(x=perc_kcal_hh_inverts,y=island))+geom_density_ridges(quantile_lines = TRUE, quantiles = 2,scale=0.99,rel_min_height = 0.01)+xlim(c(0,100))+
   geom_vline(xintercept = median(hhfoodsummary$perc_kcal_hh_inverts,na.rm=T),lty=2)+ xlab("% of seafood hhld Kcal from non reef fish")+ylab("")+
   ggtitle(paste("Median=",round(median(hhfoodsummary$perc_kcal_hh_inverts,na.rm=T)),"%"))+  theme(panel.background = element_rect(fill="white",colour="black"))
@@ -806,7 +796,7 @@ perc_contribution_inverts2<- within(perc_contribution_inverts2,
                                               levels=levels(fac2)))
 
 
-#sharks and rays
+#sharks and rays________________________________________________________________
 sharksrays<-foodrecall[foodrecall$coicop_class=="Fish and sea food"& (foodrecall$Food_description_HIES=="Shark"|foodrecall$Food_description_HIES=="Stingray"),]
 sharksrays<-ddply(sharksrays,.(interview__key),summarize,gsharksrays_pc=sum(gram_ep)/7/hhsize[1],
                kcal_sharksrays_hh=sum(kcal_JZM,na.rm=T)/7,
@@ -820,13 +810,10 @@ sharksrays<-ddply(sharksrays,.(interview__key),summarize,gsharksrays_pc=sum(gram
                niacin_mg_sharksrays_hh=sum(niacin_tmg,na.rm=T)/7,Vit_B12_mug_sharksrays_hh=sum(Vit_B12_tmug,na.rm=T)/7,Vit_C_mg_sharksrays_hh=sum(Vit_C_tmg,na.rm=T)/7,
                VitE_mug_sharksrays_hh=sum(VitE_tmug,na.rm=T)/7,cholesterol_mg_sharksrays_hh=sum(cholesterol_tmg,na.rm=T)/7,iron_non_haem_mg_sharksrays_hh=sum(iron_non_haem_tmg,na.rm=T)/7,
                iron_haem_mg_sharksrays_hh=sum(iron_haem_tmg,na.rm=T)/7)
-
-
 hhfoodsummary<-merge(hhfoodsummary,sharksrays,by="interview__key",all.x=T)
 hhfoodsummary[is.na(hhfoodsummary)]<-0
 
-#for each household: what proportion of each dietary nutrients comes from sharksrays
-#sharksrays dependence
+#for each household: what proportion of each dietary nutrients comes from sharks & rays
 hhfoodsummary<- hhfoodsummary %>%
   mutate(perc_kcal_hh_sharksrays=(kcal_sharksrays_hh/kcal_seafood_hh)*100,
          perc_grams_hh_sharksrays=(grams_sharksrays_hh/grams_seafood_hh)*100,
@@ -889,9 +876,8 @@ perc_contribution_sharksrays2<- within(perc_contribution_sharksrays2,
                                     variable<- factor(variable, 
                                                       levels=levels(fac2)))
 
-#SEAWEED
+#SEAWEED________________________________________________________________________
 seaweed<-foodrecall[foodrecall$coicop_class=="Fish and sea food"& (foodrecall$Food_description_HIES=="Seaweed"),]
-summary(as.factor(seaweed$description))
 
 seaweed<-ddply(seaweed,.(interview__key),summarize,gseaweed_pc=sum(gram_ep)/7/hhsize[1],
                kcal_seaweed_hh=sum(kcal_JZM,na.rm=T)/7,
@@ -905,13 +891,10 @@ seaweed<-ddply(seaweed,.(interview__key),summarize,gseaweed_pc=sum(gram_ep)/7/hh
                niacin_mg_seaweed_hh=sum(niacin_tmg,na.rm=T)/7,Vit_B12_mug_seaweed_hh=sum(Vit_B12_tmug,na.rm=T)/7,Vit_C_mg_seaweed_hh=sum(Vit_C_tmg,na.rm=T)/7,
                VitE_mug_seaweed_hh=sum(VitE_tmug,na.rm=T)/7,cholesterol_mg_seaweed_hh=sum(cholesterol_tmg,na.rm=T)/7,iron_non_haem_mg_seaweed_hh=sum(iron_non_haem_tmg,na.rm=T)/7,
                iron_haem_mg_seaweed_hh=sum(iron_haem_tmg,na.rm=T)/7)
-
-
 hhfoodsummary<-merge(hhfoodsummary,seaweed,by="interview__key",all.x=T)
 hhfoodsummary[is.na(hhfoodsummary)]<-0
 
-#for each household: what proportion of each dietary nutrients comes from seaweed
-#seaweed dependence
+#for each household: what proportion of each dietary nutrients comes from seaweed?
 hhfoodsummary<- hhfoodsummary %>%
   mutate(perc_kcal_hh_seaweed=(kcal_seaweed_hh/kcal_seafood_hh)*100,
          perc_grams_hh_seaweed=(grams_seaweed_hh/grams_seafood_hh)*100,
@@ -939,7 +922,7 @@ hhfoodsummary<- hhfoodsummary %>%
          perc_iron_non_haem_hh_seaweed=(iron_non_haem_mg_seaweed_hh/iron_non_haem_mg_seafood_hh)*100,
          perc_iron_haem_hh_seaweed=(iron_haem_mg_seaweed_hh/iron_haem_mg_seafood_hh)*100)
 
-#try as % of total foods instead of seafood
+#as % of total foods instead of seafood
 hhfoodsummary<- hhfoodsummary %>%
   mutate(perc_kcal_hh_seaweed=(kcal_seaweed_hh/kcal_hh)*100,
          perc_grams_hh_seaweed=(grams_seaweed_hh/grams_hh)*100,
@@ -988,9 +971,11 @@ seafoodgroup_contribution<-rbind(perc_contribution_reeffish2%>%group_by(variable
       perc_contribution_sharksrays2%>%group_by(variable)%>%summarise_all(mean,na.rm=T) %>%mutate(seafood_group=rep("Sharks & rays",ncol(perc_contribution_sharksrays) )),
       perc_contribution_seaweed2%>%group_by(variable)%>%summarise_all(mean,na.rm=T) %>%mutate(seafood_group=rep("Seaweed",ncol(perc_contribution_seaweed) )))
 seafoodgroup_contribution[is.na(seafoodgroup_contribution)]<-0
+
 #ranking of food groups
 seafoodgroup_contribution_rank<-seafoodgroup_contribution%>% filter(variable!="Cholesterol")%>% group_by(variable) %>%mutate(ranking=order(order(value,variable,decreasing=T)))
 seafoodgroup_contribution_rank<-droplevels(seafoodgroup_contribution_rank)
+
 #raster plot
 seafoodgrouprank_sum<-as.data.frame(seafoodgroup_contribution_rank %>% group_by(seafood_group) %>%dplyr::summarise(ranking_sum=sum(ranking)) %>%arrange(ranking_sum))
 seafoodgrouprank_sum$seafood_group <- reorder(seafoodgrouprank_sum$seafood_group, seafoodgrouprank_sum$ranking_sum)
@@ -1021,20 +1006,20 @@ seafoodgroupcont_fig<-ggplot(seafoodgroup_contribution_rank, aes(x = variable, y
         panel.grid = element_blank(), axis.text.y=element_blank())+ylim(levels(seafoodgrouprank_sum$seafood_group))+
   scale_x_discrete(limits=c("Non-haem iron","Carbohydrates","Fibre","Vitamin C","Betacaroten","Kcal","Sodium","Thiamin","Zinc","Total fats","Calcium","Total iron","Potassium","Magnesium","Rivoflavin","Vitamin E","Protein","Vitamin A (RAE)","Niacin","Retinol","Haem iron","Vitamin B12","Grams"))+coord_flip()
 
-#table for paper
+#supplementary table for paper
 rempsyc::nice_table(seafoodgroup_contribution_rank%>% select(-ranking) %>%
                        pivot_wider(names_from = variable, values_from = value) %>%arrange(desc(Niacin)))
 #write.csv(seafoodgroup_contribution_rank%>% select(-ranking) %>%pivot_wider(names_from = variable, values_from = value) %>%arrange(desc(Niacin)), "TableS2.csv",row.names=F)
 
 
 
-#manuscript figures
+#manuscript figures related to intake contributions_____________________________
 #fig 1
 ggarrange(allfoodcont_fig,seafoodgroupcont_fig,widths=c(1.5,1))
 #fig s1
 ggarrange(rank_allfoods_fig,seafoodgrouprank_fig,widths=c(1.3,1))
 
-#observed variability figure
+#observed variability  supplementary figure
 windows()
 a<-ggplot(NULL)+ geom_boxplot(data=perc_contribution_reeffish2%>%filter(variable!="Cholesterol"),aes(x=value, y=variable))+
   geom_jitter(data=perc_contribution_reeffish2%>%filter(variable!="Cholesterol"),aes(x=value, y=variable, fill=value),pch=21,alpha=0.04)+ guides(fill=F)+
@@ -1058,23 +1043,21 @@ g<-ggplot(NULL)+  geom_boxplot(data=perc_contribution_driedfish2%>%filter(variab
   geom_jitter(data=perc_contribution_driedfish2%>%filter(variable!="Cholesterol"), aes(x=value, y=variable, fill=value),pch=21,alpha=0.04)+guides(fill=F)+
   scale_fill_viridis_c("",option="B")+xlab("")+ylab("")+theme(plot.title = element_text(size = 9),axis.text.y = element_blank(),panel.background = element_rect(fill="white",color="black"))+ggtitle ("Dried/salted fish")+xlim(c(0,100))
 
-
 seafoodgroups_fig<-annotate_figure(ggarrange(a,b,c,d,g,e,f,nrow=1,ncol=7))
 windows()
 annotate_figure(ggarrange(allseafoodcont_fig2,seafoodgroups_fig, widths=c(0.5,1.5),labels=c("a","b"),nrow=1,ncol=2), bottom=" % contribution to household intake")
 
-
-
 ###############################################################################
-#contribution of seafood to nutritional adequacy________________________________
+#contribution of aquatic foods to nutritional adequacy__________________________
+###############################################################################
 
-#hhid and person specific data from hies data
+#hhid and person specific data from hies data (confidential) to get household-specific requirements
 HIES_HHid<-read.csv("2021-08-30_hies_tidy_household-level.csv")
 HIES_personid<-read.csv("2021-08-30_hies_tidy_individual-level.csv")
 HIES_personid<-merge(HIES_personid,HIES_HHid[,c("interview__key","hhld_id")],by="interview__key",all.x=T)
 HIES_personid$hhld_id_hm_basic__id<-paste(HIES_personid$hhld_id,HIES_personid$hm_basic__id,sep="::" )
 
-#upload rda and ai)
+#upload rda and ai
 rda<-read.csv("rda_ai.csv")
 #VB12_ugha ;Protein_gha;Selenium_ugha;Niacin_mgha;VB6_mgha;Sodium_mgha;VD_ugha;Potassium_mgha;Magnesium_mgha;Calcium_mgha
 #Copper_mgha;Zinc_mgha;Iron_mgha;Riboflavin_mgha;VA_ugha;VE_mgha;O3_gha;O6_gha;DHA_EPA_gha;ALA_gha;Iodine_ugha
@@ -1101,31 +1084,7 @@ rda2<-rda[-1,] %>% mutate(Calcium=(as.numeric(gsub(",","",Calcium))),
                           Total.Fiber=(as.numeric(gsub(",","",Total.Fiber))),
                           Iodine=(as.numeric(gsub("[*]","",Iodine))),
                           Total.Watera=(as.numeric(gsub("[*]","",Total.Watera))))
-#upper intake levels
-ui<-read.csv("ui.csv")
-ui<- ui%>% mutate_all(na_if,"")
-ui2<-ui[-1,] %>% mutate(Calcium=(as.numeric(gsub(",","",Calcium))),
-                          Proteinb=(as.numeric(gsub(",","",Proteinb))),
-                          Carbohydrate=(as.numeric(gsub(",","",Carbohydrate))),
-                          Energy=(as.numeric(gsub(",","",Energy))),
-                          Fat=(as.numeric(gsub(",","",Fat))),
-                          Vitamin.A=(as.numeric(gsub(",","",Vitamin.A))),
-                          Iron=(as.numeric(gsub(",","",Iron))),
-                          Magnesium=(as.numeric(gsub(",","",Magnesium))),
-                          Zinc=(as.numeric(gsub(",","",Zinc))),
-                          Vitamin.B12=(as.numeric(gsub(",","",Vitamin.B12))),
-                          Vitamin.C=(as.numeric(gsub(",","",Vitamin.C))),
-                          Riboflavin=(as.numeric(gsub(",","",Riboflavin))),
-                          Thiamin=(as.numeric(gsub(",","",Thiamin))),
-                          Niacin=(as.numeric(gsub(",","",Niacin))),
-                          Vitamin.E=(as.numeric(gsub(",","",Vitamin.E))),
-                          Potassium=(as.numeric(gsub(",","",Potassium))),
-                          Sodium=(as.numeric(gsub(",","",Sodium))),
-                          Total.Fiber=(as.numeric(gsub(",","",Total.Fiber))),
-                          Iodine=(as.numeric(gsub("[*]","",Iodine))),
-                          Total.Watera=(as.numeric(gsub("[*]","",Total.Watera))))
 
-#note: vitamin A accroding to the PNCD is in mug, and rda is mg (however, it gives really strange results --units in PNCD are in mg not mug
 
 #calculate kcal and nutritional requirements needed by household using person specific characteristics
 #add a category identifier to rda
@@ -1135,24 +1094,6 @@ rda_cat<-rda_cat%>% mutate(rda_cat=as.character(seq(1,nrow(rda_cat))))
 
 #add fat recommendations as 25 % of kcal recomendations (https://link.springer.com/article/10.1186/s12937-017-0271-4)
 rda_cat$Fat_indrda_perccal<-25*rda_cat$Energy_indrda/100
-
-#add category identifier to ui
-ui_cat <-ui2 
-colnames(ui_cat)<-paste(colnames(ui_cat),"indui",sep="_")
-ui_cat<-ui_cat%>% mutate(ui_cat=as.character(seq(1,nrow(ui_cat))))
-ui_cat <- ui_cat %>% mutate_all(na_if,"")
-
-#some nutrients do not have upper intake levels (however, we know there are limits)
-  #Dietary Guidelines for Americans recommends adults limit sodium intake to less than 2,300 mg per day
-  #https://health.gov/our-work/nutrition-physical-activity/dietary-guidelines/previous-dietary-guidelines/2015/advisory-report/appendix-e-3/appendix-e-31a4
-
-ui_cat$Sodium_indui<-c(1500,1500, 1500, 1800, 2200, 2300,2300,2300,2300,2300,2200,2300,2300,2300,2300,2300,2300,2300,2300,2300,2300,2300)
-
-#units are difefrent (macronutrients are in percentage of energy)
-#relation between rda and ui for those that have the same units
-summary(mutate_all(ui_cat[,3:31], function(x) as.numeric(as.character(x)))/mutate_all(rda_cat[,3:31], function(x) as.numeric(as.character(x))))
-cbind(rda[-1,1:2],mutate_all(ui_cat[,3:31], function(x) as.numeric(as.character(x)))/mutate_all(rda_cat[,3:31], function(x) as.numeric(as.character(x))))
-#magnesium upper tolerable limit is below rda!!!!
 
 #categorize individuals
 HIES_personid<-HIES_personid %>%
@@ -1180,24 +1121,14 @@ HIES_personid<-HIES_personid %>%
 
 #merge requirements
 HIES_person_req<-merge(HIES_personid,rda_cat[,-(1:2)],by="rda_cat",all.x=T)
-HIES_person_ui<-merge(HIES_personid, ui_cat[,-(1:2)],by.x="rda_cat",by.y="ui_cat",all.x=T)
 #get household level requirements (and numbers())
 hh_req<-HIES_person_req %>% dplyr::select(interview__key,Calcium_indrda:Fat_indrda_perccal) %>% dplyr::group_by(interview__key) %>% 
   mutate_if(is.character,as.numeric) %>%summarise_all(sum,na.rm=T) %>%left_join(HIES_person_req %>% group_by(interview__key) %>% dplyr::summarise(hh_number = n()))
-#(upper intakes) get sums for thsoe based on total quantity and (weighted by household numbers) averages for percentages                                                                               
-hh_ui<-HIES_person_ui %>% dplyr::select(interview__key,Calcium_indui:Total.Watera_indui) %>% dplyr::group_by(interview__key) %>% 
-  mutate_if(is.character,as.numeric) %>%summarise_all(sum,na.rm=T) %>% left_join(HIES_person_ui %>% dplyr::select(interview__key,Carbohydrate_indui:Energy_indui) %>% dplyr::group_by(interview__key) %>% 
-                                                                                   mutate_if(is.character,as.numeric) %>%summarise_all(mean,na.rm=T))%>%left_join(HIES_person_req %>% group_by(interview__key) %>% dplyr::summarise(hh_number = n()))
-summary(hh_ui)
-#IF UPPER INTAKE IS 0 IS BECAUSE THERE INST ONE
-hh_ui[hh_ui==0]<-NA
 
 #merge with food recall data
 hhfoodsummary_indrda<-merge(hhfoodsummary,hh_req,by="interview__key",all.X=T)
-hhfoodsummary_indui<-merge(hhfoodsummary,hh_ui,by="interview__key",all.X=T)
 
-
-#is there a relationship between kcal adequacy and nutrient adequacy 
+#check: is there a relationship between kcal adequacy and nutrient adequacy 
 a<-ggplot(hhfoodsummary_indrda,aes(y=iron_mg_hh/Iron_indrda,x=kcal_hh/Energy_indrda))+geom_point()+geom_abline(slope=1,intercept = 0)+geom_vline(xintercept=1,lty=2)+geom_hline(yintercept=1,lty=2)+geom_smooth()+xlab("Household kcal adequacy")+ylab("Household iron adequacy")+theme_classic()+guides(col=F)
 b<-ggplot(hhfoodsummary_indrda,aes(y=Vit_B12_mug_hh/Vitamin.B12_indrda,x=kcal_hh/Energy_indrda))+geom_point()+geom_abline(slope=1,intercept = 0)+geom_vline(xintercept=1,lty=2)+geom_hline(yintercept=1,lty=2)+geom_smooth()+xlab("Household kcal adequacy")+ylab("Household vitamin B12 adequacy")+theme_classic()+guides(col=F)
 c<-ggplot(hhfoodsummary_indrda,aes(y=calcium_mg_hh/Calcium_indrda,x=kcal_hh/Energy_indrda))+geom_point()+geom_abline(slope=1,intercept = 0)+geom_vline(xintercept=1,lty=2)+geom_hline(yintercept=1,lty=2)+geom_smooth()+xlab("Household kcal adequacy")+ylab("Household calcium adequacy")+theme_classic()+guides(col=F)
@@ -1227,50 +1158,7 @@ hhfoodsummary_indrda<- hhfoodsummary_indrda %>%
          hh_fat_rel_rda_seaweed=(tfats_g_seaweed_hh*9)/Fat_indrda_perccal)
 
 
-ggplot(hhfoodsummary_indrda)+geom_histogram(aes(x=hh_fat_rel_rda))
-
-hhfoodsummary_indui<- hhfoodsummary_indui %>%
-  mutate(hh_perc_kcal_pr=(pr_g_hh*4/kcal_hh)*100,
-         hh_perc_kcal_carbs=(carbs_g_hh*4/kcal_hh)*100,
-         hh_perc_kcal_fat=(tfats_g_hh*9/kcal_hh)*100,
-         hh_perc_kcal_pr_seafood=(pr_g_seafood_hh*4/kcal_hh)*100,
-         hh_perc_kcal_carbs_seafood=(carbs_g_seafood_hh*4/kcal_hh)*100,
-         hh_perc_kcal_fat_seafood=(tfats_g_seafood_hh*9/kcal_hh)*100) %>%
-  #and now calculateleative to upper intake limits
-  mutate(hh_pr_rel_ui=hh_perc_kcal_pr/Proteinb_indui,
-         hh_carbs_rel_ui=hh_perc_kcal_carbs/Carbohydrate_indui,
-         hh_fat_rel_ui=hh_perc_kcal_fat/Fat_indui) %>%
-  mutate(hh_sodium_rel_ui=sodium_mg_hh/Sodium_indui,
-         hh_magnesium_rel_ui=magnesium_mg_hh/Magnesium_indui,
-         hh_calcium_rel_ui=calcium_mg_hh/Calcium_indui,
-         hh_iron_rel_ui=iron_mg_hh/Iron_indui,
-         hh_zinc_rel_ui=zinc_mg_hh/Zinc_indui,
-         hh_VA_rel_ui=VitA_RAE_mug_hh/Vitamin.A_indui,
-        hh_niacin_rel_ui=niacin_mg_hh/Niacin_indui,
-        hh_VC_rel_ui=Vit_C_mg_hh/Vitamin.C_indui,
-         hh_VE_rel_ui=VitE_mug_hh/Vitamin.E_indui,
-        #seafood
-         hh_pr_rel_ui_seafood=hh_perc_kcal_pr_seafood/Proteinb_indui,
-         hh_fat_rel_ui_seafood=hh_perc_kcal_fat_seafood/Fat_indui,
-         hh_carbs_rel_ui_seafood=hh_perc_kcal_carbs_seafood/Carbohydrate_indui,
-         hh_sodium_rel_ui_seafood=sodium_mg_seafood_hh/Sodium_indui,
-         hh_magnesium_rel_ui_seafood=magnesium_mg_seafood_hh/Magnesium_indui,
-         hh_calcium_rel_ui_seafood=calcium_mg_seafood_hh/Calcium_indui,
-         hh_iron_rel_ui_seafood=iron_mg_seafood_hh/Iron_indui,
-         hh_zinc_rel_ui_seafood=zinc_mg_seafood_hh/Zinc_indui,
-         hh_VA_rel_ui_seafood=VitA_RAE_mug_seafood_hh/Vitamin.A_indui,
-         hh_niacin_rel_ui_seafood=niacin_mg_seafood_hh/Niacin_indui,
-         hh_VC_rel_ui_seafood=Vit_C_mg_seafood_hh/Vitamin.C_indui,
-         hh_VE_rel_ui_seafood=VitE_mug_seafood_hh/Vitamin.E_indui)
-
-
-#reviewer comment: relationship between seafood consumption and sodium and carb intake (or adequacy)
-
-a<-ggplot(hhfoodsummary_indrda,aes(x=sqrt(grams_seafood_hh),y=sqrt(hh_sodium_adeq)))+geom_point()+geom_smooth(method="gam")+geom_hline(yintercept = 1,lty=2)+xlab("Grams of seafood consumed per household (sqrt)")+ylab("Household sodium adequacy")
-b<-ggplot(hhfoodsummary_indrda,aes(x=sqrt(grams_seafood_hh),y=sqrt(hh_carbs_adeq)))+geom_point()+geom_smooth(method="gam")+geom_hline(yintercept = 1,lty=2)+xlab("Grams of seafood consumed per household (sqrt)")+ylab("Household carbohydrate adequacy")
-ggarrange(a,b)
-#estimate a nutrient adequacy index (i.e., how many nutrients besides kcal households are meeting in terms of adequacy )
-colnames(hhfoodsummary_indrda)
+#estimate a nutrient adequacy (from all foods and aquatic foods)
 hhfoodsummary_indrda<-hhfoodsummary_indrda %>%
   mutate(hh_pr_adeq=pr_g_hh/Proteinb_indrda,
          #hh_fat_adeq=tfats_g_hh/Fat_indrda,
@@ -1468,44 +1356,64 @@ hhfoodsummary_indrda<-hhfoodsummary_indrda %>%
 adequacies<-hhfoodsummary_indrda %>% 
   select(hh_pr_adeq:hh_kcal_adequacy)
 adequacies[]<-ifelse(adequacies>1, 1, 0)
-ncol(adequacies)
+
+#households meeting all adequacies
 hhfoodsummary_indrda$nut_adeq_met_out18<-rowSums(adequacies)
 summary(hhfoodsummary_indrda$nut_adeq_met_out18)
 length(hhfoodsummary_indrda$nut_adeq_met_out18[hhfoodsummary_indrda$nut_adeq_met_out18==18])/length(hhfoodsummary_indrda$nut_adeq_met_out18)
-length(hhfoodsummary_indrda$nut_adeq_met_out18[hhfoodsummary_indrda$nut_adeq_met_out18==17])/length(hhfoodsummary_indrda$nut_adeq_met_out18)
-
 hhfoodsummary_indrda$island[hhfoodsummary_indrda$nut_adeq_met_out18==18]
 length(unique(hhfoodsummary_indrda$island[hhfoodsummary_indrda$nut_adeq_met_out18==18]))
 length(unique(hhfoodsummary_indrda$village[hhfoodsummary_indrda$nut_adeq_met_out18==18]))
 
-#relationship
+#specific food characteristics of these households
+adeq_hh<-hhfoodsummary_indrda %>% filter(nut_adeq_met_out18==18) %>%left_join(foodrecall,by="interview__key")
+
+#check average consumption by food group
+fooditems<-adeq_hh %>%group_by(Food_description_HIES) %>%dplyr::summarize(mean_grams=mean(gram_ep)) %>%arrange(desc(mean_grams))
+fooditems$Food_description_HIES=factor(fooditems$Food_description_HIES, levels=fooditems$Food_description_HIES[order(fooditems$mean_grams)])
+fooditems2<-adeq_hh %>%group_by(coicop_class) %>%dplyr::summarize(mean_grams=mean(gram_ep)) %>%arrange(desc(mean_grams))
+fooditems2$coicop_class=factor(fooditems2$coicop_class, levels=fooditems2$coicop_class[order(fooditems2$mean_grams)])
+
+#food items for not adequate hh
+fooditems_notadeq<-hhfoodsummary_indrda %>% filter(nut_adeq_met_out18<9) %>%left_join(foodrecall,by="interview__key")%>%group_by(Food_description_HIES) %>%dplyr::summarize(mean_grams=mean(gram_ep)) %>%arrange(desc(mean_grams))
+fooditems_notadeq$Food_description_HIES=factor(fooditems_notadeq$Food_description_HIES, levels=fooditems$Food_description_HIES[order(fooditems$mean_grams)])
+fooditems2_notadeq<-hhfoodsummary_indrda %>% filter(nut_adeq_met_out18<9) %>%left_join(foodrecall,by="interview__key") %>%group_by(coicop_class) %>%dplyr::summarize(mean_grams=mean(gram_ep)) %>%arrange(desc(mean_grams))
+fooditems2_notadeq$coicop_class=factor(fooditems2_notadeq$coicop_class, levels=fooditems2_notadeq$coicop_class[order(fooditems2$mean_grams)])
+
+#supplementary figure
+a<-ggplot()+geom_bar(data=fooditems,aes(y=Food_description_HIES, x=mean_grams), stat="identity",fill="black",alpha=0.5)+xlab("Mean grams consumed weekly")+ylab("")+theme_classic()
+b<-ggplot()+geom_bar(data=fooditems2,aes(y=coicop_class, x=mean_grams), stat="identity",fill="black",alpha=0.5)+
+  geom_bar(data=fooditems2_notadeq,aes(y=coicop_class, x=mean_grams), stat="identity",fill="blue",alpha=0.5)+xlab("Mean grams consumed weekly")+ylab("")+theme_classic()
+windows()
+ggarrange(b,a, labels=c("a","b"))
+
+#relationship between number of adequacies met and kcal adequacy
 ggplot(hhfoodsummary_indrda,aes(y=nut_adeq_met_out18,x=hh_kcal_adequacy) )+geom_point(aes())+geom_smooth(aes())+
   geom_vline(xintercept = 1,lty=2)+geom_hline(yintercept = mean(hhfoodsummary_indrda$nut_adeq_met_out16),lty=2)+ylim(0,16)+theme_classic()+
   ylab("Nut adequacies met by household (out of 18)")+xlab("Household kcal adequacy")
 
-ggplot()+geom_point(aes(y=hhfoodsummary_indui$hh_sodium_rel_ui,x=hhfoodsummary_indrda$hh_kcal_adequacy))+
-  geom_vline(xintercept = 1,lty=2)+geom_hline(yintercept = 1,lty=2)+theme_classic()+
-  ylab("hh sodium intake relative to upper recommendations")+xlab("Household kcal adequacy")
 
-ggplot(melt(hhfoodsummary_indui %>%select(interview__key,hh_pr_rel_ui:hh_VE_rel_ui)))+geom_density_ridges(aes(x=value,y=variable),scale=1,rel_min_height = 0.01,quantile_lines = TRUE, quantile_fun=function(value,...)mean(value))+geom_vline(lty=2,xintercept=1) +theme_classic()+xlab(" household intake relative to upper intake recommendations")+ylab("")
+#reviewer comment: relationship between aquatic food consumption and sodium and carb intake (or adequacy)
+a<-ggplot(hhfoodsummary_indrda,aes(x=sqrt(grams_seafood_hh),y=sqrt(hh_sodium_adeq)))+geom_point()+geom_smooth(method="gam")+geom_hline(yintercept = 1,lty=2)+xlab("Grams of aquatic foods consumed per household (sqrt)")+ylab("Household sodium adequacy (sqrt)")
+b<-ggplot(hhfoodsummary_indrda,aes(x=sqrt(grams_seafood_hh),y=sqrt(hh_carbs_adeq)))+geom_point()+geom_smooth(method="gam")+geom_hline(yintercept = 1,lty=2)+xlab("Grams of aquatic foods consumed per household (sqrt)")+ylab("Household carbohydrate adequacy (sqrt)")
+ggarrange(a,b)
 
-#write.csv(hhfoodsummary_indrda %>%select(interview__key,hh_pr_adeq:nut_adeq_met_out16),"HH_ADEQUACY.CSV",row.names=F)
-#write.csv(hhfoodsummary_indui %>%select(interview__key,hh_pr_rel_ui:hh_VE_rel_ui),"HH_INTAKE_RELUI.CSV",row.names=F)
-#write.csv(hhfoodsummary_indrda %>%select(interview__key,hh_pr_adeq:nut_adeq_met_out16) %>% left_join(hhfoodsummary_indui %>%select(interview__key,hh_pr_rel_ui:hh_VE_rel_ui)),"HH_nut_rel_adeq_ui.CSV",row.names=F)
+#do for all adequacies (supplementary figure)
+windows()
+ggplot(hhfoodsummary_indrda %>% select(grams_seafood_hh,hhsize,hh_pr_adeq:hh_kcal_adequacy)  %>%pivot_longer(!grams_seafood_hh:hhsize, names_to = "nutrient", values_to = "hh_adequacy")%>%mutate(nutrient=gsub("hh_","", nutrient))%>%mutate(nutrient=gsub("_adequacy","", nutrient))%>%mutate(nutrient=gsub("_adeq","", nutrient))%>%mutate(nutrient=gsub("pr","protein", nutrient)), aes(x=sqrt(grams_seafood_hh),y=sqrt(hh_adequacy),group=nutrient))+geom_point(col="cyan4",alpha=0.5)+geom_hline(yintercept = 1,lty=2)+geom_smooth(col="grey")+facet_wrap(~nutrient, scales = "free_y", nrow=6,ncol=3)+theme_classic()+ylab("Household adequacy (sqrt)")+xlab("Grams of aquatic foods consumed per household (sqrt)")
 
-
-
-#################################################################################
-#re-do adequacy analyses of seafood contribution paper using the demiographic requirements
-nut_adequacy<-hhfoodsummary_indrda %>%select(interview__key,hh_pr_adeq:hh_kcal_adequacy)%>%gather(variable,value,-interview__key)
+#relationship between kcal adequacy and protein adequacy (supplementary figure)
 ggplot(hhfoodsummary_indrda, aes(y=hh_pr_adeq,x=hh_kcal_adequacy))+geom_point(fill="grey",pch=21,alpha=0.5)+theme_classic()+ylab("Household protein adequacy")+xlab("Household kilocalorie adequacy")+geom_vline(xintercept = 1)+geom_hline(yintercept = 1)
-#percent households above 1
+
+#get mean adequacies (qith and qithout aquatic foods), and mean adequacies by aquatic foods 
+nut_adequacy<-hhfoodsummary_indrda %>%select(interview__key,hh_pr_adeq:hh_kcal_adequacy)%>%gather(variable,value,-interview__key)
+#percent households above adequacy (1)
 nut_adequacy %>% group_by(variable) %>% dplyr::summarise(perc_hh_adeq=(sum(value>1)/length(value))*100)%>%arrange(desc(perc_hh_adeq))
-#mean
+
+#mean adequacy
 rank_ia<-as.data.frame(nut_adequacy %>% group_by(variable) %>% dplyr::summarise(mean_inadequacy=mean(value)) %>%arrange(desc(mean_inadequacy)))
 rank_ia$variable <- reorder(as.factor(rank_ia$variable), rank_ia$mean_inadequacy)
-#to add mean to ridges
-#quantile_fun=function(value,...)mean(value)
+#do supplementary figure showing avriability in adequacies across households (with and without aquatic foods)
 a<-ggplot(nut_adequacy)+geom_density_ridges_gradient(aes(x=value*100, y=variable,fill=stat(x)),scale=1,rel_min_height = 0.01,quantile_lines = TRUE, quantiles=2)+xlim(c(0,500))+
   scale_fill_gradient2("",high="navyblue",mid="white",low="darkred",midpoint = 100)+
   xlab("% of RDA from all foods")+ylab("")+theme(axis.text.y = element_text(size=9),panel.background = element_rect(fill="white",color="black"))+guides(fill=F)+geom_vline(aes(xintercept=100))+
@@ -1536,7 +1444,6 @@ nut_adequacy$withoutseafood<-(nut_adequacy$value)-(nut_adequacy$seafood_value)
 rank_ia_seafood<-as.data.frame(nut_adequacy_seafood %>% group_by(variable) %>% dplyr::summarise(mean_inadequacy=median(value)) %>%arrange(desc(mean_inadequacy)))
 rank_ia_seafood$variable <- reorder(as.factor(rank_ia_seafood$variable), rank_ia_seafood$mean_inadequacy)
 
-
 b<-ggplot(nut_adequacy)+geom_density_ridges_gradient(aes(x=seafood_value*100, y=variable,fill=stat(x)),scale=1,rel_min_height = 0.01,quantile_lines = TRUE, quantiles = 2)+xlim(c(0,400))+
   scale_fill_gradient2("",high="navyblue",mid="white",low="darkred",midpoint = 100)+  scale_y_discrete(limits=levels(rank_ia$variable))+
   xlab("% of RDA from seafood")+ylab("")+theme(axis.text.y = element_blank(),panel.background = element_rect(fill="white",color="black"))+guides(fill=F)+geom_vline(aes(xintercept=100))
@@ -1547,7 +1454,7 @@ c<-ggplot(nut_adequacy)+geom_density_ridges_gradient(aes(x=perc_withoutseafood, 
 ggarrange(a,b,c,nrow=1,ncol=3,widths=c(1.5,1,1),labels=c("a","b","c"))
 
 
-#add different seafood groups
+#add different aquatic foods groups
 nut_adequacy_reeffish<-hhfoodsummary_indrda %>%select(interview__key,hh_pr_adeq_reeffish:hh_kcal_adequacy_reeffish)%>%gather(variable,value,-interview__key)
 nut_adequacy_reeffish<-nut_adequacy_reeffish %>% mutate(variable=gsub("_reeffish","",variable))
 nut_adequacy$reeffish_value<-nut_adequacy_reeffish$value
@@ -1675,14 +1582,13 @@ rda_fig3<-ggplot()+geom_bar(data=seafoodgroup_rankai,aes(y=value*100,x=nutrient,
                                                             hh_VC_adeq="Vitamin C",
                                                             hh_VE_adeq="Vitamin E"))+theme(axis.text.y = element_blank(),panel.background = element_rect(fill="white",color="black"))+ylab("Seafood proportion")+xlab("")+guides(fill=F)
 
-windows()
-ggarrange(rda_fig,rda_fig2,rda_fig3,widths=c(2,1.5,0.6),nrow=1,ncol=3)
+#figure 2
+\ggarrange(rda_fig,rda_fig2,rda_fig3,widths=c(2,1.5,0.6),nrow=1,ncol=3)
 ggarrange(rda_fig2,rda_fig3,widths=c(1.6,0.6),nrow=1,ncol=2)
 
 ###############################################################################
-
 #hierarchical models to partition variance
-
+###############################################################################
 #overall adequacy______________________________________________________________
 hist(hhfoodsummary_indrda$hh_sodium_adeq)
 sodium_model<-brm(hh_sodium_adeq~1+ (1|island/village),data=hhfoodsummary_indrda, family="lognormal")
